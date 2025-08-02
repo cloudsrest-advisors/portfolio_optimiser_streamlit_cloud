@@ -61,6 +61,7 @@ conviction_wt = st.sidebar.slider("Conviction Score Weight", 0.0, 1.0, 0.3)
 value_wt = st.sidebar.slider("Value Score Weight", 0.0, 1.0, 0.3)
 estimate_wt = st.sidebar.slider("Estimate Score Weight", 0.0, 1.0, 0.3)
 narrative_wt = st.sidebar.slider("Narrative Diversity Weight", 0.0, 1.0, 0.1)
+risk_aversion = st.sidebar.slider("Risk aversion (λ)", 0.0, 1.0, 0.10, 0.01)
 
 st.sidebar.header("🧠 AI Model Selection")
 model_choice = st.sidebar.selectbox(
