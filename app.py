@@ -162,23 +162,38 @@ base_scores = (
     est_wt  * zseries("estimate_score")
 )
 
-# ---------- Narrative Diversity (z-scored) ----------
+
+# ---------- Narrative Diversity (z-scored; always defined) ----------
+diversity_z = pd.Series(0.0, index=portfolio_df.index)  # default zeros
+
 try:
-    if portfolio_df["investment_case_embedding"].notna().any():
-        embeddings = np.vstack(portfolio_df["investment_case_embedding"].tolist())
-        D = cosine_distances(embeddings)  # n x n
-        # exclude self-distances from the mean
-        np.fill_diagonal(D, np.nan)
-        diversity = pd.Series(np.nanmean(D, axis=1), index=portfolio_df.index)
-        diversity_z = zseries(diversity)
-        scores = base_scores + narr_wt * diversity_z
-    else:
-        diversity_z = pd.Series(0, index=portfolio_df.index)
-        scores = base_scores
+    if "investment_case_embedding" in portfolio_df.columns:
+        emb_s = portfolio_df["investment_case_embedding"]
+        valid = emb_s.notna()
+
+        if valid.sum() >= 2:  # need at least 2 to compute pairwise distances
+            # Only use valid rows to avoid vstack on None/NaN
+            emb = np.vstack(emb_s[valid].tolist())
+            D = cosine_distances(emb).astype(float)
+            np.fill_diagonal(D, np.nan)  # ignore self-distance
+
+            div_raw = pd.Series(np.nanmean(D, axis=1), index=emb_s[valid].index)
+
+            # z-score on valid rows
+            mu, sigma = div_raw.mean(), div_raw.std(ddof=0)
+            if sigma > 0:
+                div_z = (div_raw - mu) / sigma
+            else:
+                div_z = div_raw * 0.0
+
+            # write back into full index
+            diversity_z.loc[div_z.index] = div_z
+        # else: keep zeros (can’t compute diversity with <2 items)
 except Exception as e:
-    st.warning(f"Narrative diversity calculation failed: {e}")
-    diversity_z = pd.Series(0, index=portfolio_df.index)
-    scores = base_scores
+    st.warning(f"Narrative diversity calculation failed: {e} (using zeros)")
+
+# IMPORTANT: use the same slider/variable name consistently everywhere
+scores = base_scores + narr_wt * diversity_z
 
 # ---------- Select Top N & Match covariance ----------
 top_n = 20
@@ -311,8 +326,8 @@ effective_n = float(1 / np.sum(weights.values ** 2))
 top_stock = weights.idxmax()
 top_weight = float(weights.max())
 avg_diversity = None
-if diversity_series is not None:
-    avg_diversity = float(diversity_series.loc[top_ids].dot(weights))
+if diversity_z is not None:
+    avg_diversity = float(diversity_z.loc[top_ids].dot(weights))
 
 st.subheader("📊 Portfolio Summary Stats")
 portfolio_stats_html = f"""
@@ -323,7 +338,8 @@ portfolio_stats_html = f"""
     <p>📉 <strong>Portfolio Variance (wᵀΣw):</strong> {portfolio_variance:.4f}</p>
     <p>📊 <strong>Effective Number of Stocks:</strong> {effective_n:.2f}</p>
     <p>🏆 <strong>Top Stock Holding:</strong> {portfolio_df.loc[top_stock, 'name']} ({top_weight*100:.1f}%)</p>
-    {"<p>🧠 <strong>Average Narrative Diversity:</strong> {:.2f}</p>".format(avg_diversity) if avg_diversity is not None else ""}
+    { (f"<p>🧠 <strong>Average Narrative Diversity:</strong> {avg_diversity:.2f}</p>" 
+   if avg_diversity is not None else "") }
 </div>
 """
 
