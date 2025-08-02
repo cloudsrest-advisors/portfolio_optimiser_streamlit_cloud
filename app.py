@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import psycopg
+import psycopg2
 import plotly.express as px
 import ast
 import cvxpy as cp
@@ -34,7 +34,7 @@ THEME_API_URL = st.secrets["THEME_API_URL"]
 @st.cache_data
 def load_data():
     # psycopg v3 connection (DB-API compatible)
-    with psycopg.connect(**DB_CONFIG) as conn:
+    with psycopg2.connect(**DB_CONFIG) as conn:
         portfolio_df = pd.read_sql("SELECT * FROM sample_portfolio", conn)
         price_df     = pd.read_sql("SELECT * FROM price_data", conn)
     return portfolio_df, price_df
