@@ -266,8 +266,8 @@ weights = pd.Series(w_val, index=top_ids)
 optimized_df = portfolio_df.loc[top_ids].copy()
 optimized_df["Optimized Weight"] = weights
 optimized_df["Total Score"] = scores.loc[top_ids]
-if diversity_series is not None:
-    optimized_df["Narrative Diversity"] = diversity_series.loc[top_ids]
+if diversity_z is not None:
+    optimized_df["Narrative Diversity"] = diversity_z.loc[top_ids]
 
 optimized_df["Optimized Weight (%)"] = (optimized_df["Optimized Weight"] * 100).round(1).astype(str) + "%"
 
