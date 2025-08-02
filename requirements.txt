@@ -1,0 +1,10 @@
+streamlit==1.37.1
+pandas==2.2.2
+numpy==1.26.4
+plotly==5.22.0
+scikit-learn==1.4.2
+cvxpy==1.4.1
+ecos==2.0.13
+scs==3.2.4
+psycopg2-binary==2.9.9
+requests==2.32.3
