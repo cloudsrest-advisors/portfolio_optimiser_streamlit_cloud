@@ -105,11 +105,14 @@ st.dataframe(portfolio_df[existing_cols])
 st.markdown("<br><br>", unsafe_allow_html=True)
 
 
-# -------------------------------
-# Embeddings & Scoring
-# -------------------------------
-portfolio_df = portfolio_df.set_index("id", drop=False)  # keep id for lookup
 
+# ================================
+# Scoring + Optimization (drop-in)
+# ================================
+# Keep id as index (but also a column for lookup)
+portfolio_df = portfolio_df.set_index("id", drop=False)
+
+# ---------- Helpers ----------
 def parse_embedding(x):
     if isinstance(x, list):
         return x
@@ -121,65 +124,105 @@ def parse_embedding(x):
             return None
     return None
 
-portfolio_df["investment_case_embedding"] = portfolio_df.get("investment_case_embedding", None)
+def col_series(name):
+    """Safe column getter with zeros fallback."""
+    return portfolio_df.get(name, pd.Series(0, index=portfolio_df.index)).fillna(0)
+
+def zseries(name_or_series):
+    """Z-score a column (by name) or a series; zero if std==0."""
+    s = name_or_series if isinstance(name_or_series, pd.Series) else col_series(name_or_series)
+    sd = s.std(ddof=0)
+    return (s - s.mean()) / sd if sd and np.isfinite(sd) and sd > 0 else s * 0
+
+# ---------- Normalize slider weights ----------
+# We treat the four sliders as a convex combination (sum to 1 if any > 0).
+w_raw = np.array([conviction_wt, value_wt, estimate_wt, narrative_wt], dtype=float)
+w_sum = w_raw.sum()
+if w_sum > 0:
+    w_norm = w_raw / w_sum
+else:
+    # No weights selected -> all zero; avoid divide-by-zero; use equal split
+    w_norm = np.array([0.25, 0.25, 0.25, 0.25], dtype=float)
+
+conv_wt, val_wt, est_wt, narr_wt = w_norm
+
+# ---------- Parse embeddings (if present) ----------
 if "investment_case_embedding" in portfolio_df.columns:
     portfolio_df["investment_case_embedding"] = portfolio_df["investment_case_embedding"].apply(parse_embedding)
-    # Keep only rows with embeddings
     portfolio_df = portfolio_df.dropna(subset=["investment_case_embedding"])
+else:
+    # If there are no embeddings at all, create an empty column of None to simplify logic below
+    portfolio_df["investment_case_embedding"] = None
 
-# Base factor score
+# ---------- Base (z-scored) factor score ----------
 base_scores = (
-    conviction_wt * portfolio_df.get("conviction_score", pd.Series(0, index=portfolio_df.index)).fillna(0) +
-    value_wt * portfolio_df.get("value_score", pd.Series(0, index=portfolio_df.index)).fillna(0) +
-    estimate_wt * portfolio_df.get("estimate_score", pd.Series(0, index=portfolio_df.index)).fillna(0)
+    conv_wt * zseries("conviction_score") +
+    val_wt  * zseries("value_score") +
+    est_wt  * zseries("estimate_score")
 )
 
-# Narrative Diversity (mean cosine distance to others)
+# ---------- Narrative Diversity (z-scored) ----------
 try:
-    embeddings = np.vstack(portfolio_df["investment_case_embedding"].tolist())
-    pairwise_dist = cosine_distances(embeddings)
-    diversity = pairwise_dist.mean(axis=1)
-    # Scale 0–100
-    dmin, dmax = diversity.min(), diversity.max()
-    if dmax > dmin:
-        diversity_scaled = 100 * (diversity - dmin) / (dmax - dmin)
+    if portfolio_df["investment_case_embedding"].notna().any():
+        embeddings = np.vstack(portfolio_df["investment_case_embedding"].tolist())
+        D = cosine_distances(embeddings)  # n x n
+        # exclude self-distances from the mean
+        np.fill_diagonal(D, np.nan)
+        diversity = pd.Series(np.nanmean(D, axis=1), index=portfolio_df.index)
+        diversity_z = zseries(diversity)
+        scores = base_scores + narr_wt * diversity_z
     else:
-        diversity_scaled = np.zeros_like(diversity)
-    diversity_series = pd.Series(diversity_scaled, index=portfolio_df.index)
-    scores = base_scores + narrative_wt * diversity_series
+        diversity_z = pd.Series(0, index=portfolio_df.index)
+        scores = base_scores
 except Exception as e:
     st.warning(f"Narrative diversity calculation failed: {e}")
-    diversity_series = None
+    diversity_z = pd.Series(0, index=portfolio_df.index)
     scores = base_scores
 
-
-# -------------------------------
-# Select Top N & Build Optimization
-# -------------------------------
+# ---------- Select Top N & Match covariance ----------
 top_n = 20
-top_ids = scores.sort_values(ascending=False).head(top_n).index
+top_ids = scores.sort_values(ascending=False).head(top_n).index.tolist()
 
-# Align to covariance (drop ids without returns)
+# Keep only ids with covariance available
 top_ids = [i for i in top_ids if i in cov_matrix.columns]
 if len(top_ids) < 2:
     st.error("Not enough instruments with both scores and return history to optimize.")
     st.stop()
 
-score_series = scores.loc[top_ids]      # composite score per name
+score_series = scores.loc[top_ids]        # length n
 cov_sub = cov_matrix.loc[top_ids, top_ids]
 
-mu = score_series.values                # keep the name 'mu' if you like, but it's a score
-Sigma = cov_sub.values
+# ---------- Optimization problem ----------
+mu = score_series.values.astype(float)    # objective coefficients
+Sigma = cov_sub.values.astype(float)
 
-# Optimization problem: maximize mu^T w - lambda * w^T Σ w
-w = cp.Variable(len(top_ids))
-risk_aversion = 0.1
+# Add a tiny ridge for numerical stability (handles near-singular Sigma)
+eps = 1e-6 * float(np.trace(Sigma)) / max(Sigma.shape[0], 1)
+if not np.isfinite(eps) or eps <= 0:
+    eps = 1e-8
+Sigma = Sigma + np.eye(Sigma.shape[0]) * eps
 
-objective = cp.Maximize(mu @ w - risk_aversion * cp.quad_form(w, Sigma))
+n = len(top_ids)
+w = cp.Variable(n)
 
-min_weight = 0.005  # 0.5%
-max_weight = 0.07   # 10%
+# Bounds (adjust to taste)
+min_weight = 0.005   # 0.5%
+max_weight = 0.07    # 7%
 
+# Feasibility guard for given n and bounds
+if n * min_weight > 1 + 1e-12 or n * max_weight < 1 - 1e-12:
+    st.error(
+        f"Infeasible weight bounds for n = {n}: "
+        f"n*min={n*min_weight:.3f}, n*max={n*max_weight:.3f}. "
+        f"Relax bounds or change Top N."
+    )
+    st.stop()
+
+# Scale λ to covariance magnitude for robust behavior across universes
+lam_base = 0.1
+lam = lam_base * float(np.mean(np.diag(Sigma)))  # simple scale heuristic
+
+objective = cp.Maximize(mu @ w - lam * cp.quad_form(w, Sigma))
 constraints = [
     cp.sum(w) == 1,
     w >= min_weight,
@@ -187,24 +230,34 @@ constraints = [
 ]
 
 problem = cp.Problem(objective, constraints)
-opt_val = None
+
+# ---------- Solve (OSQP preferred, ECOS fallback) ----------
+w_val = None
 try:
-    opt_val = problem.solve(solver=cp.ECOS)
+    problem.solve(solver=cp.OSQP, eps_abs=1e-8, eps_rel=1e-8, max_iter=100000)
+    if w.value is not None:
+        w_val = w.value
 except Exception:
+    pass
+
+if w_val is None:
     try:
-        opt_val = problem.solve(solver=cp.SCS)
+        problem.solve(solver=cp.ECOS)
+        if w.value is not None:
+            w_val = w.value
     except Exception as e:
         st.error(f"Optimization failed: {e}")
         st.stop()
 
-if w.value is None:
-    # Fall back to equal weights if solver didn't return a solution
+if w_val is None:
     st.warning("Optimization returned no solution. Falling back to equal weights.")
-    w_val = np.ones(len(top_ids)) / len(top_ids)
-else:
-    w_val = w.value
+    w_val = np.ones(n) / n
 
+# ---------- Output weights ----------
 weights = pd.Series(w_val, index=top_ids)
+# (Optional) show quick summary
+# st.write("Objective value:", float(problem.value) if problem.value is not None else None)
+# st.dataframe(weights.rename("weight"))
 
 
 # -------------------------------
