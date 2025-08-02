@@ -26,20 +26,18 @@ DB_CONFIG = {
     "password": st.secrets["DB_PASSWORD"],
     "host": st.secrets["DB_HOST"],
     "port": int(st.secrets.get("DB_PORT", 5432)),
+    "sslmode":  "require",           # ← important for cloud hosting
 }
 
 THEME_API_URL = st.secrets["THEME_API_URL"]
 
 @st.cache_data
 def load_data():
-    conn = psycopg2.connect(**DB_CONFIG)
-    try:
+    # psycopg v3 connection (DB-API compatible)
+    with psycopg.connect(**DB_CONFIG) as conn:
         portfolio_df = pd.read_sql("SELECT * FROM sample_portfolio", conn)
-        price_df = pd.read_sql("SELECT * FROM price_data", conn)
-    finally:
-        conn.close()
+        price_df     = pd.read_sql("SELECT * FROM price_data", conn)
     return portfolio_df, price_df
-
 
 portfolio_df, price_df = load_data()
 price_df["date"] = pd.to_datetime(price_df["date"])
