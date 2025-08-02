@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import psycopg2
+import psycopg
 import plotly.express as px
 import ast
 import cvxpy as cp
